@@ -11,10 +11,10 @@ on:
 
 jobs:
   build_test_upload:
-    if: github.repository == 'pytorch/data' && github.ref_type == 'tag'
+    # if: github.repository == 'pytorch/data' && github.ref_type == 'tag'
     uses: ./.github/workflows/_build_test_upload.yml
     with:
-      branch: "v0.4.0"
+      branch: "v0.4.0-rc1"
       pre_dev_release: false
       pytorch_version: "1.12.0"
     secrets:
