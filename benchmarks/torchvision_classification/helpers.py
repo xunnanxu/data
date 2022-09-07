@@ -1,3 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+
 import itertools
 import os
 import random
@@ -17,32 +24,43 @@ INFINITE_BUFFER_SIZE = 1_000_000_000
 IMAGENET_TRAIN_LEN = 1_281_167
 IMAGENET_TEST_LEN = 50_000
 
+CIFAR_10_TRAIN_LEN = 50_000
+CIFAR_10_TEST_LEN = 10_000
+
 
 class _LenSetter(IterDataPipe):
-    # TODO: Ideally, we woudn't need this extra class
+    # TODO: We can switch to `dp.set_length()`
     def __init__(self, dp, root):
         self.dp = dp
-
-        if "train" in str(root):
+        path = str(root).lower()
+        if "train" in path and "imagenet" in path:
             self.size = IMAGENET_TRAIN_LEN
-        elif "val" in str(root):
+        elif "val" in path and "imagenet" in path:
             self.size = IMAGENET_TEST_LEN
+        if "train" in path and "cifar-10" in path:
+            self.size = CIFAR_10_TRAIN_LEN
+        elif "val" in path and "cifar-10" in path:
+            self.size = CIFAR_10_TEST_LEN
         else:
-            raise ValueError("oops?")
+            raise ValueError("oops? in LenSetter")
 
     def __iter__(self):
         yield from self.dp
 
     def __len__(self):
         # TODO The // world_size part shouldn't be needed. See https://github.com/pytorch/data/issues/533
-        return self.size // dist.get_world_size()
+        return self.size
+        # if dist.is_available():
+        #     return self.size // dist.get_world_size()
+        # else:
+        #     return self.size
 
 
 def _decode(path, root, category_to_int):
     category = Path(path).relative_to(root).parts[0]
 
     image = Image.open(path).convert("RGB")
-    label = category_to_int(category)
+    label = category_to_int[category]
 
     return image, label
 
@@ -59,7 +77,6 @@ def make_dp(root, transforms):
     category_to_int = {category: i for (i, category) in enumerate(categories)}
 
     dp = FileLister(str(root), recursive=True, masks=["*.JPEG"])
-
     dp = dp.shuffle(buffer_size=INFINITE_BUFFER_SIZE).set_shuffle(False).sharding_filter()
     dp = dp.map(partial(_decode, root=root, category_to_int=category_to_int))
     dp = dp.map(partial(_apply_tranforms, transforms=transforms))

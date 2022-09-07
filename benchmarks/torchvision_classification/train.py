@@ -1,3 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+
 import datetime
 import os
 import time
@@ -9,6 +16,7 @@ import torch
 import torch.utils.data
 import torchvision
 import utils
+from packaged_data_helpers import make_dp_from_packaged_data
 from torch import nn
 from torchdata.dataloader2 import adapter, DataLoader2, MultiProcessingReadingService
 
@@ -21,6 +29,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
 
     header = f"Epoch: [{epoch}]"
     for i, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
+        print(f"{i = }")
         if args.data_loading_only:
             continue
 
@@ -87,23 +96,80 @@ def evaluate(model, criterion, data_loader, device, args, print_freq=100, log_su
     return metric_logger.acc1.global_avg
 
 
-def create_data_loaders(args):
-    print(f"file-system = {args.fs}")
+def parse_dataset_args(args) -> str:
+    """
+    Parse arguments and return the dataset directory path.
+    """
 
-    if args.fs == "fsx":
-        dataset_dir = "/datasets01"
-    elif args.fs == "fsx_isolated":
-        dataset_dir = "/fsx_isolated"
-    elif args.fs == "ontap":
-        dataset_dir = "/datasets01_ontap"
-    elif args.fs == "ontap_isolated":
-        dataset_dir = "/ontap_isolated"
+    fs_arg_str = args.fs.lower()
+    ds_arg_str = args.dataset.lower()
+    print(f"file-system = {fs_arg_str}")
+    print(f"dataset = {ds_arg_str}")
+
+    # Custom is for running on custom AWS instance
+    if fs_arg_str == "custom":
+        dataset_dir = "/home/ubuntu/benchmark_datasets"
+        if ds_arg_str == "cifar":
+            # TODO: Need to update this for different package formats
+            dataset_dir += "/cifar-10/"
+        else:
+            raise ValueError(f"bad args.dataset, got {ds_arg_str}")
+    else:  # Assume we are running on internal AWS cluster
+        if fs_arg_str == "fsx":
+            dataset_dir = "/datasets01"
+        elif fs_arg_str == "fsx_isolated":
+            dataset_dir = "/fsx_isolated"
+        elif fs_arg_str == "ontap":
+            dataset_dir = "/datasets01_ontap"
+        elif fs_arg_str == "ontap_isolated":
+            dataset_dir = "/ontap_isolated"
+        else:
+            raise ValueError(f"bad args.fs, got {fs_arg_str}")
+
+        if ds_arg_str == "tinyimagenet":  # Data are there but need to change `make_dp` in helpers.py for it to work
+            # TODO: Need to change datapipe setup
+            dataset_dir += "/tinyimagenet/081318/"
+        elif ds_arg_str == "cifar10":
+            # TODO: This one isn't in `ontap` yet
+            raise NotImplementedError("CIFAR10 data not on disk")
+        elif ds_arg_str == "imagenette":
+            # TODO: This one isn't in `ontap` yet
+            raise NotImplementedError("Imagenette data not on disk")
+        elif ds_arg_str == "imagenet":  # This works
+            dataset_dir += "/imagenet_full_size/061417/"
+        elif ds_arg_str == "imagenet22k":
+            # TODO: Directory needs to have the `train` `val` split
+            raise NotImplementedError("imagenet-22k needs train/val split")
+            dataset_dir += "/imagenet-22k/062717/"
+        elif ds_arg_str == "lsun":
+            # TODO: This one isn't in `ontap` yet
+            raise NotImplementedError("LSUN data not on disk")
+        else:
+            raise ValueError(f"bad args.dataset, got {ds_arg_str}")
+    return dataset_dir
+
+
+def get_num_classes(args):
+    ds_arg_str = args.dataset.lower()
+
+    if ds_arg_str == "cifar":
+        return 10
+    elif ds_arg_str == "tinyimagenet":
+        return 200
+    elif ds_arg_str == "imagenet":
+        return 1000
+    elif ds_arg_str == "imagenet22k":
+        return 21841
     else:
-        raise ValueError(f"bad args.fs, got {args.fs}")
+        raise RuntimeError(f"Unknown number of classes for {ds_arg_str}, please define in `train.py`.")
 
-    dataset_dir += "/imagenet_full_size/061417/"
-    train_dir = os.path.join(dataset_dir, "train")
-    val_dir = os.path.join(dataset_dir, "val")
+
+def create_data_loaders(args):
+
+    dataset_dir = parse_dataset_args(args)
+
+    train_dir = os.path.join(dataset_dir, "default/train")
+    val_dir = os.path.join(dataset_dir, "default/val")
 
     val_resize_size, val_crop_size, train_crop_size = args.val_resize_size, args.val_crop_size, args.train_crop_size
 
@@ -114,12 +180,39 @@ def create_data_loaders(args):
         val_preset = presets.ClassificationPresetEval(crop_size=val_crop_size, resize_size=val_resize_size)
 
     if args.ds_type == "dp":
-        builder = helpers.make_pre_loaded_dp if args.preload_ds else helpers.make_dp
-        train_dataset = builder(train_dir, transforms=train_preset)
-        val_dataset = builder(val_dir, transforms=val_preset)
+        dataformat_arg_str = args.data_format.lower()
+        print("Dataset Type is DataPipe")
+        if dataformat_arg_str in ("", "default"):
+            print("Dataset Format: Default")
+            print(f"{train_dir = }")
+            print(f"{val_dir = }")
 
-        train_sampler = val_sampler = None
-        train_shuffle = True
+            builder = helpers.make_pre_loaded_dp if args.preload_ds else helpers.make_dp
+            train_dataset = builder(train_dir, transforms=train_preset)
+            val_dataset = builder(val_dir, transforms=val_preset)
+
+            train_sampler = val_sampler = None
+            train_shuffle = True
+        elif dataformat_arg_str in ("pickle_bytesio", "tar"):
+            print(f"Dataset Format: {dataformat_arg_str}")
+            train_dir = os.path.join(dataset_dir, f"{dataformat_arg_str}/train")
+            val_dir = os.path.join(dataset_dir, f"{dataformat_arg_str}/val")
+
+            print(f"{train_dir = }")
+            print(f"{val_dir = }")
+
+            archive_content = "bytesio" if dataformat_arg_str == "pickle_bytesio" else None
+
+            train_dataset = make_dp_from_packaged_data(
+                root=train_dir, archive=dataformat_arg_str, archive_content=archive_content, transforms=train_preset
+            )
+            val_dataset = make_dp_from_packaged_data(
+                root=val_dir, archive=dataformat_arg_str, archive_content=archive_content, transforms=val_preset
+            )
+            train_sampler = val_sampler = None
+            train_shuffle = True
+        else:
+            raise ValueError(f"bad args.data_format, got {dataformat_arg_str}. Only 'tar' or 'pickle_bytesio' for now.")
 
     elif args.ds_type == "iterable":
         train_dataset = torchvision.datasets.ImageFolder(train_dir, transform=train_preset)
@@ -168,6 +261,8 @@ def create_data_loaders(args):
         # Note: we are batching and collating here *after the transforms*, which is consistent with DLV1.
         # But maybe it would be more efficient to do that before, so that the transforms can work on batches??
 
+        # TODO: Note that MultiProcessingReadingService will switch over to a newer version
+
         train_dataset = train_dataset.batch(args.batch_size, drop_last=True).collate()
         train_data_loader = DataLoader2(
             train_dataset,
@@ -203,7 +298,7 @@ def main(args):
 
     train_data_loader, val_data_loader, train_sampler = create_data_loaders(args)
 
-    num_classes = 1000  # I'm lazy. TODO change this
+    num_classes = get_num_classes(args)
 
     print("Creating model")
     model = torchvision.models.__dict__[args.model](weights=args.weights, num_classes=num_classes)
@@ -259,6 +354,7 @@ def get_args_parser(add_help=True):
     parser = argparse.ArgumentParser(description="PyTorch Classification Training", add_help=add_help)
 
     parser.add_argument("--fs", default="fsx", type=str)
+    parser.add_argument("--dataset", default="imagenet", type=str, help="dataset name")
     parser.add_argument("--model", default="resnet18", type=str, help="model name")
     parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
     parser.add_argument(
@@ -275,6 +371,7 @@ def get_args_parser(add_help=True):
 
     parser.add_argument("--print-freq", default=10, type=int, help="print frequency")
     parser.add_argument("--output-dir", default=".", type=str, help="path to save outputs")
+    parser.add_argument("--data-format", default="", type=str, help="data package format, only relevant for DataPipe")
 
     parser.add_argument(
         "--test-only",
@@ -313,7 +410,7 @@ def get_args_parser(add_help=True):
         action="store_true",
         help="whether to use a fake dataset where all images are pre-loaded in RAM and already transformed. "
         "Mostly useful to benchmark how fast a model training would be without data-loading bottlenecks."
-        "Acc results are irrevant because we don't cache the entire dataset, only a very small fraction of it.",
+        "Acc results are irrelevant because we don't cache the entire dataset, only a very small fraction of it.",
     )
     parser.add_argument(
         "--data-loading-only",
@@ -328,7 +425,7 @@ def get_args_parser(add_help=True):
         "and the dataset will produce random tensors instead. We "
         "need to create random tensors because without transforms, the images would still be PIL images "
         "and they wouldn't be of the required size."
-        "Obviously, Acc resuts will not be relevant.",
+        "Obviously, Acc results will not be relevant.",
     )
 
     parser.add_argument(
