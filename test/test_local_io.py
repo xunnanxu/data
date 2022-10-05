@@ -657,6 +657,8 @@ class TestDataPipeLocalIO(expecttest.TestCase):
 
     @staticmethod
     def _slow_fn(tmpdirname, x):
+        import os
+
         with open(os.path.join(tmpdirname, str(os.getpid())), "w") as pid_fh:
             pid_fh.write("anything")
         time.sleep(10)
