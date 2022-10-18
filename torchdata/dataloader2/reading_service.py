@@ -72,6 +72,14 @@ class ReadingServiceInterface(ABC):
         """
         pass
 
+    def get_datapipe_length(self) -> Optional[int]:
+        """
+        Called by DataLoader to return the length of the DataPipe. Output should be
+        ``None`` if the length is not available for any reason. This can
+        vary by multiprocessing/distributed setting, but the output value should
+        not depend on whether iteration has begun or not.
+        """
+
 
 class CheckpointableReadingServiceInterface(ReadingServiceInterface):
     r"""
@@ -187,6 +195,7 @@ class PrototypeMultiProcessingReadingService(ReadingServiceInterface):
         self.processes = []
         self.datapipes = []
         self.combined_datapipes = None
+        self._length: Optional[int] = None
 
     @staticmethod
     def init_datapipe_process(num_workers, worker_id, datapipe):
@@ -205,6 +214,10 @@ class PrototypeMultiProcessingReadingService(ReadingServiceInterface):
         separates graph by multiple pieces and reconnects it using queues.
         creates subprocesses.
         """
+        try:
+            self._length = len(datapipe)
+        except TypeError:
+            pass
         if self.num_workers == 0:
             # TODO(616): Warn and recommend usage of InProcessReadingService
             return datapipe
@@ -267,6 +280,9 @@ class PrototypeMultiProcessingReadingService(ReadingServiceInterface):
 
         self.processes = []
 
+    def get_datapipe_length(self) -> Optional[int]:
+        return self._length
+
 
 class MultiProcessingReadingService(ReadingServiceInterface):
     r"""
@@ -302,6 +318,7 @@ class MultiProcessingReadingService(ReadingServiceInterface):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
         self.dl_: Optional[DataLoader] = None
+        self._length: Optional[int] = None
 
     # Wrap the DataLoader with IterableWrapper to respect type annotation
     def initialize(self, datapipe: DataPipe) -> DataPipe:
@@ -318,12 +335,19 @@ class MultiProcessingReadingService(ReadingServiceInterface):
             collate_fn=_collate_no_op,
             batch_size=1,  # This reading service assume batching is done via DataPipe
         )
+        try:
+            self._length = len(self.dl_)
+        except TypeError:
+            self._length = None
         return IterableWrapper(self.dl_)  # type: ignore[return-value]
 
     def finalize(self) -> None:
         if self.persistent_workers and self.dl_ is not None and self.dl_._iterator is not None:
             self.dl_._iterator._shutdown_workers()  # type: ignore[attr-defined]
             self.dl_._iterator = None
+
+    def get_datapipe_length(self) -> Optional[int]:
+        return self._length
 
 
 class DistributedReadingService(ReadingServiceInterface):
@@ -344,6 +368,7 @@ class DistributedReadingService(ReadingServiceInterface):
         self._datapipe: Optional[DataPipe] = None
         self._timeout: int = timeout
         self._pg: Optional[dist.ProcessGroup] = None
+        self._length: Optional[int] = None
 
     def initialize(self, datapipe: DataPipe) -> DataPipe:
         r"""
@@ -365,6 +390,10 @@ class DistributedReadingService(ReadingServiceInterface):
         if not isinstance(datapipe, FullSync):
             datapipe = datapipe.fullsync(self._timeout)
         self._datapipe = datapipe
+        try:
+            self._length = len(datapipe)
+        except TypeError:
+            self._length = None
         return datapipe
 
     def initialize_iteration(self) -> None:
@@ -393,3 +422,6 @@ class DistributedReadingService(ReadingServiceInterface):
         Clean up the distributed process group.
         """
         self._pg = None
+
+    def get_datapipe_length(self) -> Optional[int]:
+        return self._length
